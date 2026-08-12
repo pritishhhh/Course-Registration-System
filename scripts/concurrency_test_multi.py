@@ -14,9 +14,9 @@ DB_CONFIG = dict(
     password=os.environ.get("PGPASSWORD", "postgres"),
 )
 
-NUM_STUDENTS_TO_TRY = 10000
+NUM_STUDENTS_TO_TRY = int(os.environ.get("NUM_STUDENTS_TO_TRY", "200"))
 NUM_COURSES_PER_STUDENT = 2
-NUM_THREADS = 80
+NUM_THREADS = int(os.environ.get("NUM_THREADS", "50"))
 
 db_pool = pool.ThreadedConnectionPool(1, NUM_THREADS, **DB_CONFIG)
 
