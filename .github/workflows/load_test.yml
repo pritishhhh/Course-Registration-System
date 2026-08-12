@@ -13,6 +13,16 @@ on:
         required: true
         default: '50'
         type: string
+      subjects:
+        description: 'Number of subjects to include (1 to 4)'
+        required: true
+        default: '4'
+        type: string
+      capacity:
+        description: 'Number of enrollments (capacity) per subject'
+        required: true
+        default: '30'
+        type: string
 
 jobs:
   run-load-test:
@@ -67,6 +77,8 @@ jobs:
           PGPASSWORD: postgres
           NUM_STUDENTS_TO_TRY: ${{ github.event.inputs.students }}
           NUM_THREADS: ${{ github.event.inputs.threads }}
+          NUM_SUBJECTS: ${{ github.event.inputs.subjects }}
+          SUBJECT_CAPACITY: ${{ github.event.inputs.capacity }}
         run: |
           cd scripts
           python concurrency_test_multi.py

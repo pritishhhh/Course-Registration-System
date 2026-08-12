@@ -15,7 +15,9 @@ DB_CONFIG = dict(
 )
 
 NUM_STUDENTS_TO_TRY = int(os.environ.get("NUM_STUDENTS_TO_TRY", "200"))
-NUM_COURSES_PER_STUDENT = 2
+NUM_SUBJECTS = int(os.environ.get("NUM_SUBJECTS", "4"))
+SUBJECT_CAPACITY = int(os.environ.get("SUBJECT_CAPACITY", "0"))
+NUM_COURSES_PER_STUDENT = int(os.environ.get("NUM_COURSES_PER_STUDENT", "2"))
 NUM_THREADS = int(os.environ.get("NUM_THREADS", "50"))
 
 db_pool = pool.ThreadedConnectionPool(1, NUM_THREADS, **DB_CONFIG)
@@ -25,11 +27,16 @@ def get_conn():
 
 def get_all_sections():
     with get_conn() as conn, conn.cursor() as cur:
+        if SUBJECT_CAPACITY > 0:
+            cur.execute("UPDATE course_sections SET capacity = %s", (SUBJECT_CAPACITY,))
+            conn.commit()
+            
         cur.execute("""
             SELECT s.section_id, s.capacity, c.course_code
             FROM course_sections s
             JOIN courses c ON c.course_id = s.course_id
-        """)
+            LIMIT %s
+        """, (NUM_SUBJECTS,))
         return cur.fetchall()
 
 def get_student_ids(n):
@@ -141,8 +148,9 @@ def main():
     student_ids = get_student_ids(NUM_STUDENTS_TO_TRY)
     
     student_targets = []
+    actual_courses_per_student = min(NUM_COURSES_PER_STUDENT, len(section_ids))
     for sid in student_ids:
-        chosen_sections = random.sample(section_ids, NUM_COURSES_PER_STUDENT)
+        chosen_sections = random.sample(section_ids, actual_courses_per_student)
         for sec_id in chosen_sections:
             student_targets.append((sid, sec_id))
             
