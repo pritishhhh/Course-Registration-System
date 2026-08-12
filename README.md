@@ -67,3 +67,17 @@ When 200 students race for 30 seats across 50 concurrent workers:
 ```
 
 The database forces the concurrent transactions to serialize precisely, ensuring the capacity limits are perfectly respected and waitlists are generated in a strict first-come, first-served order.
+
+## GitHub Actions (Automated Load Testing)
+
+This repository includes a GitHub Actions workflow that allows you to run massive concurrency stress tests directly from your browser—no local setup required.
+
+To run a test:
+1. Go to the **Actions** tab on your GitHub repository.
+2. Select the **Concurrency Load Test** workflow on the left sidebar.
+3. Click **Run workflow** and customize your parameters:
+   - **Number of students** (e.g., 10000)
+   - **Number of concurrent workers (threads)** (e.g., 80)
+   - **Number of subjects to include** (1 to 4)
+   - **Capacity per subject** (Overrides the database default)
+4. GitHub will spin up PostgreSQL, seed the database, and execute the Python load test against both the naive and safe implementations simultaneously. You can view the massive overbooking vs clean throughput right in the action logs!
