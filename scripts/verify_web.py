@@ -1,8 +1,11 @@
 """Exercise the main student flow against a disposable PostgreSQL database."""
 
 import os
+import sys
+from pathlib import Path
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import django
 
