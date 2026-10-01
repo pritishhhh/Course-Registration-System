@@ -1,83 +1,45 @@
 # Concurrent Course Registration System
 
-This project demonstrates how to handle extreme database concurrency—specifically, solving the race condition that occurs when hundreds of users attempt to book the final available seats simultaneously (e.g., concert tickets, university courses).
+A Django student website backed by PostgreSQL seat allocation functions. Students can create an account, browse sections, register, see their enrollments or waitlist positions, and drop a section. Staff can manage courses, terms, and sections through Django admin. The database serializes competing requests for a section with `SELECT ... FOR UPDATE`, so multiple web workers share the same seat decision.
 
-It showcases the difference between a naive check-then-act pattern and a robust implementation using PostgreSQL row-level pessimistic locking (`SELECT ... FOR UPDATE`), proving that the latter prevents overbooking under intense load.
+This is a functional pilot, not yet a university production system. The limitations below matter before using real student data.
 
-## The Problem
+## Run locally
 
-Section `CS101-A` has 30 seats. At 9:00 AM, 200 students click "Register" at the exact same moment. 
+1. Start the disposable database: `docker compose up -d`. Compose loads `db/01_schema.sql` through `db/04_seed.sql` only when its data volume is first created.
+2. Install dependencies: `python -m pip install -r requirements.txt -r scripts/requirements.txt`.
+3. Set `DEBUG=1` and `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/registration` in your shell.
+4. Run `python manage.py migrate`, then `python manage.py runserver`.
+5. Open `http://localhost:8000/`. Sign up for a student account. To use the staff area, run `python manage.py createsuperuser` and open `/admin/`.
 
-If the application reads the seat count, sees availability, and then writes the enrollment (naive approach), multiple transactions will read the same stale data before any writes land. The result is overbooking.
+Run `python scripts/verify_registration.py` only against a disposable database: it resets the sample `CS101-A` section. `python scripts/verify_web.py` creates a test student and exercises the main website flow. GitHub Actions runs both checks against a fresh PostgreSQL service on every push and pull request.
 
-This project solves the race condition entirely within the database layer using transactions and locking.
+The sample SQL files are not automatically reloaded when an existing Compose volume starts again. Do not delete a database volume containing data just to apply a schema change; use a new migration.
 
-## Architecture
+## Render deployment preparation
 
-- **`course_sections`**: Stores `capacity` and `seats_filled`. Protected by a `CHECK` constraint.
-- **`enrollments`**: Enforces a partial unique index so students cannot double-book the same section.
-- **`registration_audit`**: An append-only log populated automatically by a trigger to reconstruct the timeline of concurrent requests.
+`render.yaml` declares one Python web service and one private Render PostgreSQL instance. The web service gets `DATABASE_URL` from the database and a generated `SECRET_KEY`. It installs dependencies, collects admin static files, applies the initial SQL schema, runs Django migrations, and starts Gunicorn. The database has no public IP allowlist entries. Render is configured to deploy commits after GitHub checks pass.
 
-## Concurrency Strategies
+To put this online, push the reviewed changes to GitHub, connect the repository to a Render Blueprint, and review the resource plan before creation because it can incur charges. After the first deployment, create a staff account in the Render shell with `python manage.py createsuperuser`. Use `/admin/` to create terms, courses, and sections. The production deployment does **not** load `db/04_seed.sql` or any demo students.
 
-| Approach | Mechanism | Trade-offs |
-|---|---|---|
-| **Pessimistic Locking** (Default) | `SELECT ... FOR UPDATE` locks the row before reading or writing. Concurrent callers queue on the database lock. | Extremely safe, prevents race conditions. Throughput is limited by the lock queue. |
-| **Optimistic Locking** | Reads a `version` column and updates only if the version matches. Requires application-side retry logic. | Better throughput under low contention, but can lead to livelock under extreme load. |
-| **Naive Check-Then-Act** | Reads seat count and acts. | Included in the load test specifically to demonstrate catastrophic overbooking under concurrency. |
+The schema runner records hashes of applied SQL files and refuses to silently replay a changed file. Add a new numbered migration for later database changes. It is intended for a fresh production database; the existing Compose database was initialized directly by Docker and is not registered with this migration runner.
 
-## Running the Load Test
+## Registration behavior
 
-1. Start the PostgreSQL instance and load the schema:
-```bash
-docker compose up -d
-```
+- `fn_register_safe(student_id, section_id)` locks the section row, checks the registration window and existing active enrollment, then allocates a seat or a waitlist place in one transaction.
+- `fn_drop_enrollment(student_id, section_id)` drops a seat and promotes the first waitlisted student while holding the same lock.
+- Unique and check constraints prevent duplicate active enrollments, invalid waitlist positions, and seat counters beyond capacity.
+- A row lock prevents overbooking for callers that use these functions. It does not guarantee that requests are served in exact HTTP arrival order.
 
-2. Install dependencies:
-```bash
-cd scripts
-pip install -r requirements.txt
-```
+The old load-test example claiming 75 persisted enrollments for a 30-seat section conflicted with the schema's capacity check. The deliberately unsafe comparison path may instead produce database errors. The CI verification script asserts invariants; the comparison script is educational only.
 
-3. Run the load test to see the race condition in action:
-```bash
-python concurrency_test.py
-```
-*(You can also run `concurrency_test_multi.py` to test registrations distributed across multiple courses).*
+## Work still needed before real student use
 
-4. Run the analytics query to inspect the waitlist ordering:
-```bash
-psql postgresql://postgres:postgres@localhost:5432/registration -f ../queries/analytics.sql
-```
+1. Verify email addresses or integrate the institution's identity provider; self-signup currently trusts the submitted email.
+2. Add prerequisite, schedule-clash, credit-limit, academic-hold, and drop-deadline rules. Seat availability is the only eligibility rule currently enforced.
+3. Restrict the application's database role to approved operations. The initial Render database owner can still alter tables directly.
+4. Add request idempotency keys, throttling, lock timeouts, and controlled retries for transient errors. Define p95/p99 latency and run realistic burst tests against the deployed service.
+5. Add password-reset email, account recovery, user support, backup and restore drills, audit access controls and retention, monitoring, and incident procedures.
+6. Add a proper sequence of SQL migrations for future releases. Do not edit already-applied schema files.
 
-## Load Test Results
-
-When 200 students race for 30 seats across 50 concurrent workers:
-
-**Naive Approach:**
-```
-  actual ENROLLED rows in enrollments table: 75
-  *** OVERBOOKED by 45 seat(s) ***
-```
-
-**Safe Approach (Pessimistic Locking):**
-```
-  actual ENROLLED rows in enrollments table: 30
-  No overbooking.
-```
-
-The database forces the concurrent transactions to serialize precisely, ensuring the capacity limits are perfectly respected and waitlists are generated in a strict first-come, first-served order.
-
-## GitHub Actions (Automated Load Testing)
-
-This repository includes a GitHub Actions workflow that allows you to run massive concurrency stress tests directly from your browser—no local setup required.
-
-To run a test:
-1. Go to the **Actions** tab on your GitHub repository.
-2. Select the **Concurrency Load Test** workflow on the left sidebar.
-3. Click **Run workflow** and customize your parameters:
-   - **Number of students** (e.g., 10000)
-   - **Number of concurrent workers (threads)** (e.g., 80)
-   - **Number of subjects to include** (1 to 4)
-   - **Capacity per subject** (Overrides the database default)
-4. GitHub will spin up PostgreSQL, seed the database, and execute the Python load test against both the naive and safe implementations simultaneously. You can view the massive overbooking vs clean throughput right in the action logs!
+For very large opening-day bursts, use admission control or a waiting room so database connection and lock queues remain bounded. Scale web workers based on measured traffic while keeping seat allocation in PostgreSQL.

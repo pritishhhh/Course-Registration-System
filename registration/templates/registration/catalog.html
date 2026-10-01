@@ -1,0 +1,24 @@
+{% extends "registration/base.html" %}
+{% block title %}Course catalog{% endblock %}
+{% block content %}
+<h1>Course catalog</h1>
+<p class="muted">Browse sections and request a seat. Availability can change while you register.</p>
+<div class="grid">
+{% for s in sections %}
+  <article class="card">
+    <span class="badge">{{ s.name }}</span>
+    <h2>{{ s.course_code }} · {{ s.section_code }}</h2>
+    <p><strong>{{ s.title }}</strong></p>
+    <p class="muted">{{ s.credits }} credits{% if s.instructor %} · {{ s.instructor }}{% endif %}</p>
+    <p>{{ s.seats_filled }} of {{ s.capacity }} seats filled · {{ s.waitlisted }} waitlisted</p>
+    {% if user.is_authenticated %}
+      <form method="post" action="{% url 'register' s.section_id %}">{% csrf_token %}<button type="submit">Register</button></form>
+    {% else %}
+      <a class="button" href="{% url 'login' %}">Log in to register</a>
+    {% endif %}
+  </article>
+{% empty %}
+  <p>No sections are available yet.</p>
+{% endfor %}
+</div>
+{% endblock %}
