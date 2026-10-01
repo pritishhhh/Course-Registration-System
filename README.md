@@ -12,7 +12,7 @@ This is a functional pilot, not yet a university production system. The limitati
 4. Run `python manage.py migrate`, then `python manage.py runserver`.
 5. Open `http://localhost:8000/`. Sign up for a student account. To use the staff area, run `python manage.py createsuperuser` and open `/admin/`.
 
-Run `python scripts/verify_registration.py` only against a disposable database: it resets the sample `CS101-A` section. `python scripts/verify_web.py` creates a test student and exercises the main website flow. GitHub Actions runs both checks against a fresh PostgreSQL service on every push and pull request.
+Run `python scripts/verify_registration.py` only against a disposable database: it resets the sample `CS101-A` section. `python scripts/verify_web.py` exercises the main website flow and a busy-lock response. `python scripts/verify_web_concurrency.py` races 80 authenticated website requests for 5 seats and 10 waitlist places. GitHub Actions runs these checks against a fresh PostgreSQL service on pull requests and pushes to `main`.
 
 The sample SQL files are not automatically reloaded when an existing Compose volume starts again. Do not delete a database volume containing data just to apply a schema change; use a new migration.
 
@@ -30,6 +30,7 @@ The schema runner records hashes of applied SQL files and refuses to silently re
 - `fn_drop_enrollment(student_id, section_id)` uses the same lock order, then drops a seat and promotes the first waitlisted student while holding the section lock.
 - Unique and check constraints prevent duplicate active enrollments, invalid waitlist positions, and seat counters beyond capacity.
 - A row lock prevents overbooking for callers that use these functions. It does not guarantee that requests are served in exact HTTP arrival order.
+- The web layer sets bounded database lock and statement timeouts and asks the student to retry if a section is temporarily too busy.
 
 The old load-test example claiming 75 persisted enrollments for a 30-seat section conflicted with the schema's capacity check. The deliberately unsafe comparison path may instead produce database errors. The CI verification script asserts invariants; the comparison script is educational only.
 

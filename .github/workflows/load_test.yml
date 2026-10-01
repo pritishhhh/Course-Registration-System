@@ -90,6 +90,14 @@ jobs:
           PGPASSWORD: postgres
         run: python scripts/verify_registration.py
 
+      - name: Verify concurrent web requests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/registration
+          SECRET_KEY: ci-only-test-secret
+          ALLOWED_HOSTS: testserver,localhost
+          DEBUG: '1'
+        run: python scripts/verify_web_concurrency.py
+
       - name: Run comparative load demo
         if: github.event_name == 'workflow_dispatch'
         env:
