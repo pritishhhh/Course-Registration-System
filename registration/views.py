@@ -1,9 +1,10 @@
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
-from django.db import IntegrityError, connection, transaction
+from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from .forms import SignUpForm
@@ -16,6 +17,7 @@ def catalog(request):
             SELECT s.section_id, c.course_code, c.title, c.credits,
                    s.section_code, s.instructor, s.capacity, s.seats_filled,
                    s.waitlist_capacity, t.name,
+                   t.registration_opens_at, t.registration_closes_at,
                    (SELECT count(*) FROM enrollments e WHERE e.section_id = s.section_id
                     AND e.status = 'WAITLISTED') AS waitlisted
             FROM course_sections s
@@ -25,6 +27,19 @@ def catalog(request):
         """)
         columns = [column[0] for column in cursor.description]
         sections = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    now = timezone.now()
+    for section in sections:
+        if section["registration_opens_at"] and now < section["registration_opens_at"]:
+            section["availability_label"] = "Registration has not opened"
+        elif section["registration_closes_at"] and now >= section["registration_closes_at"]:
+            section["availability_label"] = "Registration closed"
+        elif section["seats_filled"] < section["capacity"]:
+            section["availability_label"] = "Seats available"
+        elif section["waitlisted"] < section["waitlist_capacity"]:
+            section["availability_label"] = "Waitlist available"
+        else:
+            section["availability_label"] = "Section and waitlist full"
+        section["can_register"] = section["availability_label"] in {"Seats available", "Waitlist available"}
     return render(request, "registration/catalog.html", {"sections": sections})
 
 
@@ -62,22 +77,41 @@ def _student_id(request):
         return None
 
 
+def _run_seat_action(action, student_id, section_id):
+    """Keep lock waits bounded so a registration spike cannot hang a worker."""
+    function = {
+        "register": "fn_register_safe",
+        "drop": "fn_drop_enrollment",
+    }[action]
+    try:
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute("SET LOCAL lock_timeout = '3s'")
+            cursor.execute("SET LOCAL statement_timeout = '10s'")
+            cursor.execute(f"SELECT {function}(%s, %s)", [student_id, section_id])
+            return cursor.fetchone()[0]
+    except DatabaseError as error:
+        code = getattr(error.__cause__, "pgcode", None)
+        if code in {"55P03", "40P01", "40001", "57014"}:
+            return "BUSY_RETRY"
+        raise
+
+
 @login_required
 @require_POST
 def register(request, section_id):
     student_id = _student_id(request)
     if student_id is None:
         return redirect("catalog")
-    with transaction.atomic(), connection.cursor() as cursor:
-        cursor.execute("SELECT fn_register_safe(%s, %s)", [student_id, section_id])
-        result = cursor.fetchone()[0]
+    result = _run_seat_action("register", student_id, section_id)
     messages.info(request, {
         "ENROLLED": "You have a seat.",
         "WAITLISTED": "You are on the waitlist.",
         "ALREADY_REGISTERED": "You already have an active registration for this section.",
+        "ALREADY_IN_COURSE": "You already have an active section of this course this term.",
         "FULL_NO_WAITLIST": "This section and its waitlist are full.",
         "REGISTRATION_CLOSED": "Registration is closed for this term.",
         "SECTION_NOT_FOUND": "Section not found.",
+        "BUSY_RETRY": "Registration is busy. Please try again in a moment.",
     }.get(result, "Registration could not be completed."))
     return redirect("my_courses")
 
@@ -88,10 +122,11 @@ def drop(request, section_id):
     student_id = _student_id(request)
     if student_id is None:
         return redirect("catalog")
-    with transaction.atomic(), connection.cursor() as cursor:
-        cursor.execute("SELECT fn_drop_enrollment(%s, %s)", [student_id, section_id])
-        result = cursor.fetchone()[0]
-    messages.info(request, "Registration dropped." if result == "DROPPED" else "No active registration was found.")
+    result = _run_seat_action("drop", student_id, section_id)
+    messages.info(request, {
+        "DROPPED": "Registration dropped.",
+        "BUSY_RETRY": "Registration is busy. Please try dropping again in a moment.",
+    }.get(result, "No active registration was found."))
     return redirect("my_courses")
 
 

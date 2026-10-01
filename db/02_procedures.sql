@@ -20,12 +20,22 @@ DECLARE
     v_next_pos   INT;
     v_opens_at   TIMESTAMPTZ;
     v_closes_at  TIMESTAMPTZ;
+    v_course_id  INT;
+    v_term_id    INT;
 BEGIN
-    -- Lock the section row. Any other transaction calling this function for
-    -- the same section_id will block here until this transaction commits.
+    -- Always lock the student before the section. This also serializes two
+    -- requests by one student for different sections of the same course.
+    PERFORM 1 FROM students WHERE student_id = p_student_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN 'STUDENT_NOT_FOUND';
+    END IF;
+
+    -- Competing students for one section queue on this row.
     SELECT s.capacity, s.seats_filled, s.waitlist_capacity,
-           t.registration_opens_at, t.registration_closes_at
-      INTO v_capacity, v_filled, v_wl_cap, v_opens_at, v_closes_at
+           t.registration_opens_at, t.registration_closes_at,
+           s.course_id, s.term_id
+      INTO v_capacity, v_filled, v_wl_cap, v_opens_at, v_closes_at,
+           v_course_id, v_term_id
       FROM course_sections s
       JOIN terms t ON t.term_id = s.term_id
      WHERE s.section_id = p_section_id
@@ -35,10 +45,6 @@ BEGIN
         RETURN 'SECTION_NOT_FOUND';
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM students WHERE student_id = p_student_id) THEN
-        RETURN 'STUDENT_NOT_FOUND';
-    END IF;
-
     -- Return the existing outcome even when the section and waitlist are full.
     IF EXISTS (
         SELECT 1 FROM enrollments
@@ -46,6 +52,18 @@ BEGIN
           AND status IN ('ENROLLED', 'WAITLISTED')
     ) THEN
         RETURN 'ALREADY_REGISTERED';
+    END IF;
+
+    -- One active section per course and term. The student row lock makes this
+    -- check safe even when the requests target two different section rows.
+    IF EXISTS (
+        SELECT 1 FROM enrollments e
+        JOIN course_sections other ON other.section_id = e.section_id
+        WHERE e.student_id = p_student_id
+          AND e.status IN ('ENROLLED', 'WAITLISTED')
+          AND other.course_id = v_course_id AND other.term_id = v_term_id
+    ) THEN
+        RETURN 'ALREADY_IN_COURSE';
     END IF;
 
     IF (v_opens_at IS NOT NULL AND clock_timestamp() < v_opens_at)
@@ -113,6 +131,11 @@ DECLARE
     v_promoted_student INT;
     v_dropped_position INT;
 BEGIN
+    PERFORM 1 FROM students WHERE student_id = p_student_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN 'STUDENT_NOT_FOUND';
+    END IF;
+
     PERFORM 1 FROM course_sections WHERE section_id = p_section_id FOR UPDATE;
     IF NOT FOUND THEN
         RETURN 'SECTION_NOT_FOUND';

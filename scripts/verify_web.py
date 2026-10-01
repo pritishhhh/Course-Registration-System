@@ -8,6 +8,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import django
+import psycopg2
 
 django.setup()
 
@@ -39,7 +40,20 @@ def main():
     assert client.post(f"/sections/{section_id}/register/").status_code == 302
     assert client.post(f"/sections/{section_id}/drop/").status_code == 302
     assert b"CS101" not in client.get("/my-courses/").content
-    print("PASS: health, catalog, signup, registration, duplicate, and drop")
+
+    # A contended section should return a useful message, then allow a retry.
+    blocker = psycopg2.connect(os.environ["DATABASE_URL"])
+    try:
+        with blocker.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM course_sections WHERE section_id = %s FOR UPDATE", [section_id])
+        assert client.post(f"/sections/{section_id}/register/").status_code == 302
+        assert b"Registration is busy" in client.get("/my-courses/").content
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert client.post(f"/sections/{section_id}/register/").status_code == 302
+    assert b"CS101" in client.get("/my-courses/").content
+    print("PASS: health, catalog, signup, registration, duplicate, drop, and busy retry")
 
 
 if __name__ == "__main__":

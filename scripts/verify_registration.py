@@ -4,6 +4,7 @@ Run only against a disposable database: this resets the CS101-A section.
 """
 
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 
@@ -74,6 +75,35 @@ def main():
     assert results.count("WAITLISTED") == 10, results
     assert results.count("FULL_NO_WAITLIST") == 65, results
     check(section_id, 5, 10)
+
+    # A student racing for two sections of the same course can hold only one.
+    second_sections = []
+    for _ in range(2):
+        code = f"TEST-{uuid.uuid4().hex[:12]}"
+        second_sections.append(query(
+            """INSERT INTO course_sections
+               (course_id, term_id, section_code, capacity, waitlist_capacity)
+               SELECT course_id, term_id, %s, 2, 0 FROM course_sections
+               WHERE section_id = %s RETURNING section_id""",
+            (code, section_id),
+        )[0][0])
+    another_student = query("SELECT student_id FROM students ORDER BY student_id OFFSET 89 LIMIT 1")[0][0]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        course_results = list(executor.map(
+            lambda target: register(another_student, target), second_sections
+        ))
+    assert sorted(course_results) == ["ALREADY_IN_COURSE", "ENROLLED"], course_results
+    winner = second_sections[course_results.index("ENROLLED")]
+    loser = second_sections[course_results.index("ALREADY_IN_COURSE")]
+    assert drop(another_student, winner) == "DROPPED"
+    assert register(another_student, loser) == "ENROLLED"
+    check(winner, 2, 0)
+    check(loser, 2, 0)
+    assert drop(another_student, loser) == "DROPPED"
+    for extra_section in second_sections:
+        query("DELETE FROM registration_audit WHERE section_id = %s", (extra_section,))
+        query("DELETE FROM enrollments WHERE section_id = %s", (extra_section,))
+        query("DELETE FROM course_sections WHERE section_id = %s", (extra_section,))
 
     waitlist = query(
         """SELECT student_id FROM enrollments WHERE section_id = %s

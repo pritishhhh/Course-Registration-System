@@ -77,6 +77,8 @@ jobs:
         run: |
           python manage.py migrate --noinput
           python manage.py check
+          python manage.py seed_demo
+          python manage.py seed_demo
           python scripts/verify_web.py
 
       - name: Verify registration invariants

@@ -11,9 +11,12 @@
     <p><strong>{{ s.title }}</strong></p>
     <p class="muted">{{ s.credits }} credits{% if s.instructor %} · {{ s.instructor }}{% endif %}</p>
     <p>{{ s.seats_filled }} of {{ s.capacity }} seats filled · {{ s.waitlisted }} waitlisted</p>
-    {% if user.is_authenticated %}
-      <form method="post" action="{% url 'register' s.section_id %}">{% csrf_token %}<button type="submit">Register</button></form>
-    {% else %}
+    <p><strong>{{ s.availability_label }}</strong></p>
+    {% if s.registration_opens_at %}<p class="muted">Opens {{ s.registration_opens_at|date:"M j, Y, g:i A T" }}</p>{% endif %}
+    {% if s.registration_closes_at %}<p class="muted">Closes {{ s.registration_closes_at|date:"M j, Y, g:i A T" }}</p>{% endif %}
+    {% if user.is_authenticated and s.can_register %}
+      <form method="post" action="{% url 'register' s.section_id %}">{% csrf_token %}<button type="submit">{% if s.seats_filled < s.capacity %}Request seat{% else %}Join waitlist{% endif %}</button></form>
+    {% elif not user.is_authenticated and s.can_register %}
       <a class="button" href="{% url 'login' %}">Log in to register</a>
     {% endif %}
   </article>
