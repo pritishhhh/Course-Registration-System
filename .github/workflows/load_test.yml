@@ -1,6 +1,9 @@
 name: Concurrency Load Test
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
     inputs:
       students:
@@ -53,22 +56,53 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Initialize Database Schema
-        env:
-          PGPASSWORD: postgres
-        run: |
-          # The github actions runner comes with psql installed
-          psql -h localhost -U postgres -d registration -f db/01_schema.sql
-          psql -h localhost -U postgres -d registration -f db/02_procedures.sql
-          psql -h localhost -U postgres -d registration -f db/03_triggers.sql
-          psql -h localhost -U postgres -d registration -f db/04_seed.sql
-
       - name: Install Dependencies
         run: |
-          cd scripts
-          pip install -r requirements.txt
+          pip install -r requirements.txt -r scripts/requirements.txt
 
-      - name: Run Load Test
+      - name: Initialize Database Schema
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/registration
+          SECRET_KEY: ci-only-test-secret
+          DEBUG: '1'
+          BOOTSTRAP_ONLY: '1'
+          PGPASSWORD: postgres
+        run: |
+          bash scripts/start_free.sh
+          psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d registration -f db/04_seed.sql
+
+      - name: Verify web flow
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/registration
+          SECRET_KEY: ci-only-test-secret
+          ALLOWED_HOSTS: testserver,localhost
+          DEBUG: '1'
+        run: |
+          python manage.py migrate --noinput
+          python manage.py check
+          python manage.py seed_demo
+          python manage.py seed_demo
+          python scripts/verify_web.py
+
+      - name: Verify registration invariants
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGDATABASE: registration
+          PGUSER: postgres
+          PGPASSWORD: postgres
+        run: python scripts/verify_registration.py
+
+      - name: Verify concurrent web requests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/registration
+          SECRET_KEY: ci-only-test-secret
+          ALLOWED_HOSTS: testserver,localhost
+          DEBUG: '1'
+        run: python scripts/verify_web_concurrency.py
+
+      - name: Run comparative load demo
+        if: github.event_name == 'workflow_dispatch'
         env:
           PGHOST: localhost
           PGPORT: 5432

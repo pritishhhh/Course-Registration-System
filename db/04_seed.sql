@@ -12,7 +12,8 @@ INSERT INTO courses (course_code, title, credits) VALUES
     ('CS101', 'Introduction to Programming', 4),
     ('CS201', 'Data Structures & Algorithms', 4),
     ('MA110', 'Calculus I', 3),
-    ('EC150', 'Principles of Economics', 3);
+    ('EC150', 'Principles of Economics', 3)
+ON CONFLICT (course_code) DO NOTHING;
 
 -- One popular, tightly-capped section: this is the "hot row".
 INSERT INTO course_sections (course_id, term_id, section_code, instructor, capacity, waitlist_capacity)

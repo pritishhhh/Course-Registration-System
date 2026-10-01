@@ -35,6 +35,7 @@ def get_all_sections():
             SELECT s.section_id, s.capacity, c.course_code
             FROM course_sections s
             JOIN courses c ON c.course_id = s.course_id
+            ORDER BY s.section_id
             LIMIT %s
         """, (NUM_SUBJECTS,))
         return cur.fetchall()

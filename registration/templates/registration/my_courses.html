@@ -1,0 +1,18 @@
+{% extends "registration/base.html" %}
+{% block title %}My courses{% endblock %}
+{% block content %}
+<h1>My courses</h1>
+<div class="grid">
+{% for e in enrollments %}
+  <article class="card">
+    <span class="badge">{{ e.name }}</span>
+    <h2>{{ e.course_code }} · {{ e.section_code }}</h2>
+    <p>{{ e.title }}</p>
+    <p><strong>{{ e.status }}</strong>{% if e.waitlist_position %} · position {{ e.waitlist_position }}{% endif %}</p>
+    <form method="post" action="{% url 'drop' e.section_id %}">{% csrf_token %}<button class="danger" type="submit">Drop</button></form>
+  </article>
+{% empty %}
+  <p>You have no active course registrations. <a href="{% url 'catalog' %}">Browse courses</a>.</p>
+{% endfor %}
+</div>
+{% endblock %}

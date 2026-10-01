@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Course registration{% endblock %}</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #f5f7fb; color: #182235; }
+    header { background: #162743; color: white; padding: 1rem max(1rem, calc((100vw - 1100px)/2)); display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    header a { color: white; text-decoration: none; }
+    nav { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    nav form { margin: 0; }
+    nav button { background: transparent; color: white; border: 0; cursor: pointer; font: inherit; }
+    main { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-top: 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+    .card { background: white; border: 1px solid #dce3ed; border-radius: 10px; padding: 1.25rem; box-shadow: 0 2px 8px #15243a0c; }
+    .muted { color: #5d6878; }
+    .badge { display: inline-block; background: #e8f0ff; color: #174384; padding: .2rem .55rem; border-radius: 99px; font-size: .85rem; }
+    button, .button { background: #174ea6; color: white; border: 0; border-radius: 6px; padding: .65rem .9rem; cursor: pointer; font: inherit; }
+    button:hover, .button:hover { background: #123b7c; }
+    .danger { background: #a52626; }
+    .message { padding: .85rem 1rem; margin-bottom: 1rem; border-radius: 6px; background: #e8f0ff; }
+    input { display: block; width: min(100%, 28rem); box-sizing: border-box; padding: .6rem; margin: .25rem 0 1rem; border: 1px solid #aeb8c7; border-radius: 5px; }
+    .errorlist { color: #a52626; }
+    .form-card { max-width: 32rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong><a href="{% url 'catalog' %}">Course registration</a></strong>
+    <nav aria-label="Main navigation">
+      <a href="{% url 'catalog' %}">Catalog</a>
+      {% if user.is_authenticated %}
+        <a href="{% url 'my_courses' %}">My courses</a>
+        {% if user.is_staff %}<a href="/admin/">Admin</a>{% endif %}
+        <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button type="submit">Log out</button></form>
+      {% else %}
+        <a href="{% url 'login' %}">Log in</a>
+        <a href="{% url 'signup' %}">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+  <main>
+    {% for message in messages %}<div class="message" role="status">{{ message }}</div>{% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

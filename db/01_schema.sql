@@ -14,14 +14,18 @@ CREATE TABLE courses (
     course_id    SERIAL PRIMARY KEY,
     course_code  TEXT UNIQUE NOT NULL,
     title        TEXT NOT NULL,
-    credits      SMALLINT NOT NULL DEFAULT 3
+    credits      SMALLINT NOT NULL DEFAULT 3 CHECK (credits > 0)
 );
 
 CREATE TABLE terms (
     term_id                  SERIAL PRIMARY KEY,
     name                     TEXT NOT NULL,
     registration_opens_at    TIMESTAMPTZ,
-    registration_closes_at   TIMESTAMPTZ
+    registration_closes_at   TIMESTAMPTZ,
+    CONSTRAINT valid_registration_window CHECK (
+        registration_opens_at IS NULL OR registration_closes_at IS NULL
+        OR registration_opens_at < registration_closes_at
+    )
 );
 
 -- The "hot row" of the whole system: capacity + seats_filled on a section
@@ -34,7 +38,7 @@ CREATE TABLE course_sections (
     instructor        TEXT,
     capacity          INT NOT NULL CHECK (capacity > 0),
     seats_filled      INT NOT NULL DEFAULT 0 CHECK (seats_filled >= 0),
-    waitlist_capacity INT NOT NULL DEFAULT 10,
+    waitlist_capacity INT NOT NULL DEFAULT 10 CHECK (waitlist_capacity >= 0),
     version           INT NOT NULL DEFAULT 0,  -- used by the optimistic-locking variant, see README
     UNIQUE (course_id, term_id, section_code),
     CONSTRAINT seats_within_capacity CHECK (seats_filled <= capacity)
@@ -49,7 +53,11 @@ CREATE TABLE enrollments (
     status            enrollment_status NOT NULL,
     waitlist_position INT,
     requested_at      TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    decided_at        TIMESTAMPTZ
+    decided_at        TIMESTAMPTZ,
+    CONSTRAINT valid_waitlist_position CHECK (
+        (status = 'WAITLISTED' AND waitlist_position IS NOT NULL AND waitlist_position > 0)
+        OR (status <> 'WAITLISTED' AND waitlist_position IS NULL)
+    )
 );
 
 -- A student can only hold ONE *active* (enrolled/waitlisted) row per section.

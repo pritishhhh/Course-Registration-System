@@ -18,17 +18,57 @@ DECLARE
     v_wl_cap     INT;
     v_wl_count   INT;
     v_next_pos   INT;
+    v_opens_at   TIMESTAMPTZ;
+    v_closes_at  TIMESTAMPTZ;
+    v_course_id  INT;
+    v_term_id    INT;
 BEGIN
-    -- Lock the section row. Any other transaction calling this function for
-    -- the same section_id will block here until this transaction commits.
-    SELECT capacity, seats_filled, waitlist_capacity
-      INTO v_capacity, v_filled, v_wl_cap
-      FROM course_sections
-     WHERE section_id = p_section_id
-     FOR UPDATE;
+    -- Always lock the student before the section. This also serializes two
+    -- requests by one student for different sections of the same course.
+    PERFORM 1 FROM students WHERE student_id = p_student_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN 'STUDENT_NOT_FOUND';
+    END IF;
+
+    -- Competing students for one section queue on this row.
+    SELECT s.capacity, s.seats_filled, s.waitlist_capacity,
+           t.registration_opens_at, t.registration_closes_at,
+           s.course_id, s.term_id
+      INTO v_capacity, v_filled, v_wl_cap, v_opens_at, v_closes_at,
+           v_course_id, v_term_id
+      FROM course_sections s
+      JOIN terms t ON t.term_id = s.term_id
+     WHERE s.section_id = p_section_id
+     FOR UPDATE OF s;
 
     IF NOT FOUND THEN
         RETURN 'SECTION_NOT_FOUND';
+    END IF;
+
+    -- Return the existing outcome even when the section and waitlist are full.
+    IF EXISTS (
+        SELECT 1 FROM enrollments
+        WHERE student_id = p_student_id AND section_id = p_section_id
+          AND status IN ('ENROLLED', 'WAITLISTED')
+    ) THEN
+        RETURN 'ALREADY_REGISTERED';
+    END IF;
+
+    -- One active section per course and term. The student row lock makes this
+    -- check safe even when the requests target two different section rows.
+    IF EXISTS (
+        SELECT 1 FROM enrollments e
+        JOIN course_sections other ON other.section_id = e.section_id
+        WHERE e.student_id = p_student_id
+          AND e.status IN ('ENROLLED', 'WAITLISTED')
+          AND other.course_id = v_course_id AND other.term_id = v_term_id
+    ) THEN
+        RETURN 'ALREADY_IN_COURSE';
+    END IF;
+
+    IF (v_opens_at IS NOT NULL AND clock_timestamp() < v_opens_at)
+       OR (v_closes_at IS NOT NULL AND clock_timestamp() >= v_closes_at) THEN
+        RETURN 'REGISTRATION_CLOSED';
     END IF;
 
     -- Seat available -> enroll directly.
@@ -37,7 +77,7 @@ BEGIN
             INSERT INTO enrollments (student_id, section_id, status, decided_at)
             VALUES (p_student_id, p_section_id, 'ENROLLED', clock_timestamp());
         EXCEPTION WHEN unique_violation THEN
-            RETURN 'ALREADY_ENROLLED';
+            RETURN 'ALREADY_REGISTERED';
         END;
 
         UPDATE course_sections
@@ -69,7 +109,7 @@ BEGIN
         INSERT INTO enrollments (student_id, section_id, status, waitlist_position, decided_at)
         VALUES (p_student_id, p_section_id, 'WAITLISTED', v_next_pos, clock_timestamp());
     EXCEPTION WHEN unique_violation THEN
-        RETURN 'ALREADY_ENROLLED';
+        RETURN 'ALREADY_REGISTERED';
     END;
 
     INSERT INTO registration_audit (section_id, student_id, action, detail)
@@ -89,13 +129,19 @@ DECLARE
     v_status         enrollment_status;
     v_promoted_id    INT;
     v_promoted_student INT;
+    v_dropped_position INT;
 BEGIN
+    PERFORM 1 FROM students WHERE student_id = p_student_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN 'STUDENT_NOT_FOUND';
+    END IF;
+
     PERFORM 1 FROM course_sections WHERE section_id = p_section_id FOR UPDATE;
     IF NOT FOUND THEN
         RETURN 'SECTION_NOT_FOUND';
     END IF;
 
-    SELECT status INTO v_status
+    SELECT status, waitlist_position INTO v_status, v_dropped_position
       FROM enrollments
      WHERE student_id = p_student_id
        AND section_id = p_section_id
@@ -107,7 +153,8 @@ BEGIN
     END IF;
 
     UPDATE enrollments
-       SET status = 'DROPPED', decided_at = clock_timestamp()
+       SET status = 'DROPPED', waitlist_position = NULL,
+           decided_at = clock_timestamp()
      WHERE student_id = p_student_id AND section_id = p_section_id
        AND status = v_status;
 
@@ -149,11 +196,12 @@ BEGIN
                     jsonb_build_object('vacated_by', p_student_id));
         END IF;
     ELSE
-        -- Was only waitlisted: just close the gap behind them.
+        -- Only students behind the dropped position move forward.
         UPDATE enrollments
            SET waitlist_position = waitlist_position - 1
          WHERE section_id = p_section_id
-           AND status = 'WAITLISTED';
+           AND status = 'WAITLISTED'
+           AND waitlist_position > v_dropped_position;
 
         INSERT INTO registration_audit (section_id, student_id, action)
         VALUES (p_section_id, p_student_id, 'DROPPED_WAITLIST');
