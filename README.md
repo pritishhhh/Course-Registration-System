@@ -16,11 +16,16 @@ Run `python scripts/verify_registration.py` only against a disposable database: 
 
 The sample SQL files are not automatically reloaded when an existing Compose volume starts again. Do not delete a database volume containing data just to apply a schema change; use a new migration.
 
-## Render deployment preparation
+## Free portfolio deployment: Render + Neon
 
-`render.yaml` declares one Python web service and one private Render PostgreSQL instance. The web service gets `DATABASE_URL` from the database and a generated `SECRET_KEY`. It installs dependencies, collects admin static files, applies the initial SQL schema, runs Django migrations, and starts Gunicorn. The database has no public IP allowlist entries. Render is configured to deploy commits after GitHub checks pass.
+`render.yaml` now requests **one free Render Python web service** and no Render database. Use a **free Neon PostgreSQL project** for persistent data; Render's own free PostgreSQL database expires after 30 days. The Render Blueprint asks for `DATABASE_URL` during setup and generates `SECRET_KEY`. Copy Neon's direct connection string, including `sslmode=require`, into that field. Keep the URL private.
 
-To put this online, push the reviewed changes to GitHub, connect the repository to a Render Blueprint, and review the resource plan before creation because it can incur charges. After the first deployment, run `python manage.py seed_demo` in the Render shell to add four sample courses, then create a staff account with `python manage.py createsuperuser`. The seed command can be rerun without duplicating its catalog. The production deployment does **not** load `db/04_seed.sql` or any fake students.
+1. Create a free Neon project and copy its direct PostgreSQL connection string. Use the same database region as the Render web service if possible.
+2. After the reviewed pull request is merged, connect the GitHub repository to Render and create a Blueprint from `render.yaml`. Confirm that the web service plan says **Free**. Enter the Neon URL as `DATABASE_URL`; do not put it in GitHub or in the YAML file.
+3. The first start runs the SQL schema, Django migrations, and `seed_demo` before Gunicorn accepts traffic. The command is safe to rerun when the free web service wakes from sleep. It adds four sample sections without fake student accounts.
+4. Open the `onrender.com` URL. To create a staff account, set `DATABASE_URL` to the same Neon URL and `DEBUG=1` in your local shell, then run `python manage.py createsuperuser` locally. Render's free web service has no shell access.
+
+The site and database can stay on free plans within their usage limits, but Render's free web service sleeps after 15 minutes without traffic and can take about a minute to wake. Neon can also pause idle compute. This is suitable for a low-traffic portfolio demo, not a guaranteed always-on service. Render may limit unusually high outbound traffic from a free web service, including traffic to an external database. Check current free-plan limits and billing settings before enabling a payment method.
 
 The schema runner records hashes of applied SQL files and refuses to silently replay a changed file. Add a new numbered migration for later database changes. It is intended for a fresh production database; the existing Compose database was initialized directly by Docker and is not registered with this migration runner.
 
@@ -38,7 +43,7 @@ The old load-test example claiming 75 persisted enrollments for a 30-seat sectio
 
 1. Verify email addresses or integrate the institution's identity provider; self-signup currently trusts the submitted email.
 2. Add prerequisite, schedule-clash, credit-limit, academic-hold, and drop-deadline rules. Seat availability and one active section per course are the only eligibility rules currently enforced.
-3. Restrict the application's database role to approved operations. The initial Render database owner can still alter tables directly.
+3. Restrict the application's database role to approved operations. The initial Neon database owner can still alter tables directly.
 4. Add request idempotency keys, throttling, lock timeouts, and controlled retries for transient errors. Define p95/p99 latency and run realistic burst tests against the deployed service.
 5. Add password-reset email, account recovery, user support, backup and restore drills, audit access controls and retention, monitoring, and incident procedures.
 6. Add a proper sequence of SQL migrations for future releases. Do not edit already-applied schema files.

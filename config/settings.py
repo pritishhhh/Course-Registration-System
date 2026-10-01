@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import parse_qs, urlparse, unquote
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -62,6 +62,11 @@ WSGI_APPLICATION = "config.wsgi.application"
 database_url = urlparse(os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/registration"))
 if database_url.scheme not in {"postgres", "postgresql"}:
     raise ImproperlyConfigured("DATABASE_URL must be a PostgreSQL URL")
+database_query = parse_qs(database_url.query)
+database_options = {"connect_timeout": 10}
+for option in ("sslmode", "channel_binding"):
+    if option in database_query:
+        database_options[option] = database_query[option][-1]
 DATABASES = {"default": {
     "ENGINE": "django.db.backends.postgresql",
     "NAME": unquote(database_url.path.lstrip("/")),
@@ -69,8 +74,8 @@ DATABASES = {"default": {
     "PASSWORD": unquote(database_url.password or ""),
     "HOST": database_url.hostname,
     "PORT": database_url.port or 5432,
-    "CONN_MAX_AGE": 60,
-    "OPTIONS": {"connect_timeout": 5},
+    "CONN_MAX_AGE": 0,
+    "OPTIONS": database_options,
 }}
 
 AUTH_PASSWORD_VALIDATORS = [

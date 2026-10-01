@@ -63,9 +63,12 @@ jobs:
       - name: Initialize Database Schema
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/registration
+          SECRET_KEY: ci-only-test-secret
+          DEBUG: '1'
+          BOOTSTRAP_ONLY: '1'
           PGPASSWORD: postgres
         run: |
-          python scripts/apply_schema.py
+          bash scripts/start_free.sh
           psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d registration -f db/04_seed.sql
 
       - name: Verify web flow
