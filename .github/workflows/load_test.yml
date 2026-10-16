@@ -1,84 +1,61 @@
-name: Concurrency Load Test
+name: Database and API checks
 
 on:
+  push:
+  pull_request:
   workflow_dispatch:
     inputs:
       students:
-        description: 'Number of students to simulate racing for seats'
-        required: true
+        description: Number of simulated students (1-20000)
         default: '500'
-        type: string
       threads:
-        description: 'Number of concurrent workers (threads)'
-        required: true
-        default: '50'
-        type: string
+        description: Concurrent workers (1-80)
+        default: '20'
       subjects:
-        description: 'Number of subjects to include (1 to 4)'
-        required: true
+        description: Course sections (1-4)
         default: '4'
-        type: string
       capacity:
-        description: 'Number of enrollments (capacity) per subject'
-        required: true
+        description: Seats per section
         default: '30'
-        type: string
+
+permissions:
+  contents: read
 
 jobs:
-  run-load-test:
+  test:
     runs-on: ubuntu-latest
-    
-    # Run a PostgreSQL service container alongside the runner
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: registration
+          POSTGRES_DB: registration_test
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
         ports:
           - 5432:5432
         options: >-
           --health-cmd pg_isready
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
-
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/registration_test
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Initialize Database Schema
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Initialize disposable database
         env:
-          PGPASSWORD: postgres
-        run: |
-          # The github actions runner comes with psql installed
-          psql -h localhost -U postgres -d registration -f db/01_schema.sql
-          psql -h localhost -U postgres -d registration -f db/02_procedures.sql
-          psql -h localhost -U postgres -d registration -f db/03_triggers.sql
-          psql -h localhost -U postgres -d registration -f db/04_seed.sql
-
-      - name: Install Dependencies
-        run: |
-          cd scripts
-          pip install -r requirements.txt
-
-      - name: Run Load Test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/registration_test
+        run: python scripts/init_db.py
+      - run: python -m pytest -q
+      - name: Threaded load test
         env:
-          PGHOST: localhost
-          PGPORT: 5432
-          PGDATABASE: registration
-          PGUSER: postgres
-          PGPASSWORD: postgres
-          NUM_STUDENTS_TO_TRY: ${{ github.event.inputs.students }}
-          NUM_THREADS: ${{ github.event.inputs.threads }}
-          NUM_SUBJECTS: ${{ github.event.inputs.subjects }}
-          SUBJECT_CAPACITY: ${{ github.event.inputs.capacity }}
-        run: |
-          cd scripts
-          python concurrency_test_multi.py
+          NUM_STUDENTS_TO_TRY: ${{ inputs.students || '200' }}
+          NUM_THREADS: ${{ inputs.threads || '20' }}
+          NUM_SUBJECTS: ${{ inputs.subjects || '4' }}
+          SUBJECT_CAPACITY: ${{ inputs.capacity || '30' }}
+        run: python scripts/concurrency_test_multi.py
