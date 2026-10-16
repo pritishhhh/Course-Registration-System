@@ -1,215 +1,89 @@
--- =========================================================
--- 02_procedures.sql
--- The concurrency-safe registration / drop logic.
---
--- Key idea: SELECT ... FOR UPDATE on the course_sections row turns every
--- concurrent "can I get a seat?" check into a queue. Whoever gets the row
--- lock first checks seats_filled < capacity and, still holding the lock,
--- writes both the enrollment row and the updated seat count in the SAME
--- transaction. No other transaction can read a stale seat count and act
--- on it, because it's blocked waiting for the lock -- not racing against it.
--- =========================================================
-
-CREATE OR REPLACE FUNCTION fn_register_safe(p_student_id INT, p_section_id INT)
-RETURNS TEXT AS $$
+-- Lock order: section, term, enrollment. Use one section per transaction.
+CREATE FUNCTION fn_register_safe(p_student_id INT, p_section_id INT)
+RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
-    v_capacity   INT;
-    v_filled     INT;
-    v_wl_cap     INT;
-    v_wl_count   INT;
-    v_next_pos   INT;
+    sec course_sections%ROWTYPE;
+    existing_status enrollment_status;
+    opens TIMESTAMPTZ;
+    closes TIMESTAMPTZ;
+    wl_count INT;
 BEGIN
-    -- Lock the section row. Any other transaction calling this function for
-    -- the same section_id will block here until this transaction commits.
-    SELECT capacity, seats_filled, waitlist_capacity
-      INTO v_capacity, v_filled, v_wl_cap
-      FROM course_sections
-     WHERE section_id = p_section_id
-     FOR UPDATE;
-
-    IF NOT FOUND THEN
-        RETURN 'SECTION_NOT_FOUND';
-    END IF;
-
-    -- Seat available -> enroll directly.
-    IF v_filled < v_capacity THEN
-        BEGIN
-            INSERT INTO enrollments (student_id, section_id, status, decided_at)
-            VALUES (p_student_id, p_section_id, 'ENROLLED', clock_timestamp());
-        EXCEPTION WHEN unique_violation THEN
-            RETURN 'ALREADY_ENROLLED';
-        END;
-
-        UPDATE course_sections
-           SET seats_filled = seats_filled + 1,
-               version = version + 1
-         WHERE section_id = p_section_id;
-
-        INSERT INTO registration_audit (section_id, student_id, action, detail)
-        VALUES (p_section_id, p_student_id, 'ENROLLED',
-                jsonb_build_object('seats_filled_after', v_filled + 1, 'capacity', v_capacity));
-
+    SELECT * INTO sec FROM course_sections WHERE section_id = p_section_id FOR UPDATE;
+    IF NOT FOUND THEN RETURN 'SECTION_NOT_FOUND'; END IF;
+    PERFORM 1 FROM students WHERE student_id = p_student_id;
+    IF NOT FOUND THEN RETURN 'STUDENT_NOT_FOUND'; END IF;
+    -- A retry stays idempotent even after the section fills or registration closes.
+    SELECT status INTO existing_status FROM enrollments
+    WHERE student_id = p_student_id AND section_id = p_section_id
+      AND status IN ('ENROLLED', 'WAITLISTED');
+    IF FOUND THEN RETURN 'ALREADY_' || existing_status::TEXT; END IF;
+    SELECT registration_opens_at, registration_closes_at INTO opens, closes
+    FROM terms WHERE term_id = sec.term_id FOR SHARE;
+    -- Evaluate after waiting for locks, not at transaction start.
+    IF opens > clock_timestamp() THEN RETURN 'REGISTRATION_NOT_OPEN'; END IF;
+    IF closes <= clock_timestamp() THEN RETURN 'REGISTRATION_CLOSED'; END IF;
+    IF sec.seats_filled < sec.capacity THEN
+        INSERT INTO enrollments (student_id, section_id, status)
+        VALUES (p_student_id, p_section_id, 'ENROLLED');
+        UPDATE course_sections SET seats_filled = seats_filled + 1 WHERE section_id = p_section_id;
         RETURN 'ENROLLED';
     END IF;
-
-    -- Section full -> try the waitlist.
-    SELECT count(*) INTO v_wl_count
-      FROM enrollments
-     WHERE section_id = p_section_id AND status = 'WAITLISTED';
-
-    IF v_wl_count >= v_wl_cap THEN
-        INSERT INTO registration_audit (section_id, student_id, action, detail)
-        VALUES (p_section_id, p_student_id, 'REJECTED_FULL', jsonb_build_object('reason', 'section and waitlist full'));
+    SELECT count(*) INTO wl_count FROM enrollments
+    WHERE section_id = p_section_id AND status = 'WAITLISTED';
+    IF wl_count >= sec.waitlist_capacity THEN
+        INSERT INTO registration_audit (section_id, student_id, action)
+        VALUES (p_section_id, p_student_id, 'REJECTED_FULL');
         RETURN 'FULL_NO_WAITLIST';
     END IF;
-
-    v_next_pos := v_wl_count + 1;
-
-    BEGIN
-        INSERT INTO enrollments (student_id, section_id, status, waitlist_position, decided_at)
-        VALUES (p_student_id, p_section_id, 'WAITLISTED', v_next_pos, clock_timestamp());
-    EXCEPTION WHEN unique_violation THEN
-        RETURN 'ALREADY_ENROLLED';
-    END;
-
-    INSERT INTO registration_audit (section_id, student_id, action, detail)
-    VALUES (p_section_id, p_student_id, 'WAITLISTED', jsonb_build_object('position', v_next_pos));
-
+    INSERT INTO enrollments (student_id, section_id, status, waitlist_position)
+    VALUES (p_student_id, p_section_id, 'WAITLISTED', wl_count + 1);
     RETURN 'WAITLISTED';
 END;
-$$ LANGUAGE plpgsql;
-
-
--- Dropping a seat and promoting the next waitlisted student happens
--- atomically under the same row lock, so a promoted student can never be
--- "double promoted" by two concurrent drops.
-CREATE OR REPLACE FUNCTION fn_drop_enrollment(p_student_id INT, p_section_id INT)
-RETURNS TEXT AS $$
+$$;
+CREATE FUNCTION fn_drop_enrollment(p_student_id INT, p_section_id INT)
+RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
-    v_status         enrollment_status;
-    v_promoted_id    INT;
-    v_promoted_student INT;
+    target enrollments%ROWTYPE;
+    promoted BIGINT;
 BEGIN
     PERFORM 1 FROM course_sections WHERE section_id = p_section_id FOR UPDATE;
-    IF NOT FOUND THEN
-        RETURN 'SECTION_NOT_FOUND';
-    END IF;
-
-    SELECT status INTO v_status
-      FROM enrollments
-     WHERE student_id = p_student_id
-       AND section_id = p_section_id
-       AND status IN ('ENROLLED', 'WAITLISTED')
-     FOR UPDATE;
-
-    IF NOT FOUND THEN
-        RETURN 'NOT_ENROLLED';
-    END IF;
-
-    UPDATE enrollments
-       SET status = 'DROPPED', decided_at = clock_timestamp()
-     WHERE student_id = p_student_id AND section_id = p_section_id
-       AND status = v_status;
-
-    IF v_status = 'ENROLLED' THEN
-        UPDATE course_sections
-           SET seats_filled = seats_filled - 1,
-               version = version + 1
-         WHERE section_id = p_section_id;
-
-        INSERT INTO registration_audit (section_id, student_id, action)
-        VALUES (p_section_id, p_student_id, 'DROPPED_ENROLLED');
-
-        -- Promote the earliest waitlisted student, if any.
-        SELECT enrollment_id, student_id INTO v_promoted_id, v_promoted_student
-          FROM enrollments
-         WHERE section_id = p_section_id AND status = 'WAITLISTED'
-         ORDER BY waitlist_position ASC
-         LIMIT 1
-         FOR UPDATE;
-
+    IF NOT FOUND THEN RETURN 'SECTION_NOT_FOUND'; END IF;
+    SELECT * INTO target FROM enrollments
+    WHERE student_id = p_student_id AND section_id = p_section_id
+      AND status IN ('ENROLLED', 'WAITLISTED') FOR UPDATE;
+    IF NOT FOUND THEN RETURN 'NOT_ENROLLED'; END IF;
+    UPDATE enrollments SET status = 'DROPPED', waitlist_position = NULL,
+        decided_at = clock_timestamp() WHERE enrollment_id = target.enrollment_id;
+    IF target.status = 'ENROLLED' THEN
+        SELECT enrollment_id INTO promoted FROM enrollments
+        WHERE section_id = p_section_id AND status = 'WAITLISTED'
+        ORDER BY waitlist_position, enrollment_id LIMIT 1 FOR UPDATE;
         IF FOUND THEN
-            UPDATE enrollments
-               SET status = 'ENROLLED', waitlist_position = NULL, decided_at = clock_timestamp()
-             WHERE enrollment_id = v_promoted_id;
-
-            UPDATE course_sections
-               SET seats_filled = seats_filled + 1,
-                   version = version + 1
-             WHERE section_id = p_section_id;
-
-            -- Close the gap in waitlist positions for everyone behind them.
-            UPDATE enrollments
-               SET waitlist_position = waitlist_position - 1
-             WHERE section_id = p_section_id
-               AND status = 'WAITLISTED';
-
-            INSERT INTO registration_audit (section_id, student_id, action, detail)
-            VALUES (p_section_id, v_promoted_student, 'PROMOTED_FROM_WAITLIST',
-                    jsonb_build_object('vacated_by', p_student_id));
+            UPDATE enrollments SET status = 'ENROLLED', waitlist_position = NULL,
+                decided_at = clock_timestamp() WHERE enrollment_id = promoted;
+            UPDATE enrollments SET waitlist_position = waitlist_position - 1
+            WHERE section_id = p_section_id AND status = 'WAITLISTED';
+        ELSE
+            UPDATE course_sections SET seats_filled = seats_filled - 1 WHERE section_id = p_section_id;
         END IF;
     ELSE
-        -- Was only waitlisted: just close the gap behind them.
-        UPDATE enrollments
-           SET waitlist_position = waitlist_position - 1
-         WHERE section_id = p_section_id
-           AND status = 'WAITLISTED';
-
-        INSERT INTO registration_audit (section_id, student_id, action)
-        VALUES (p_section_id, p_student_id, 'DROPPED_WAITLIST');
+        -- Only people behind the dropped student move forward.
+        UPDATE enrollments SET waitlist_position = waitlist_position - 1
+        WHERE section_id = p_section_id AND status = 'WAITLISTED'
+          AND waitlist_position > target.waitlist_position;
     END IF;
-
     RETURN 'DROPPED';
 END;
-$$ LANGUAGE plpgsql;
-
-
--- Optimistic-locking alternative, kept for comparison (see README).
--- Instead of taking a row lock, it reads the version, then does a
--- conditional UPDATE that only succeeds if the version hasn't changed.
--- The CALLER is responsible for retrying on 'CONFLICT_RETRY'.
-CREATE OR REPLACE FUNCTION fn_register_optimistic(p_student_id INT, p_section_id INT)
-RETURNS TEXT AS $$
-DECLARE
-    v_capacity INT;
-    v_filled   INT;
-    v_version  INT;
-    v_rows     INT;
+$$;
+-- Link identities by the verified immutable auth subject, never by email.
+CREATE FUNCTION fn_ensure_student(p_subject UUID, p_email TEXT)
+RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE result INT;
 BEGIN
-    SELECT capacity, seats_filled, version
-      INTO v_capacity, v_filled, v_version
-      FROM course_sections
-     WHERE section_id = p_section_id;
-
-    IF NOT FOUND THEN
-        RETURN 'SECTION_NOT_FOUND';
-    END IF;
-
-    IF v_filled >= v_capacity THEN
-        RETURN 'FULL';
-    END IF;
-
-    UPDATE course_sections
-       SET seats_filled = seats_filled + 1,
-           version = version + 1
-     WHERE section_id = p_section_id
-       AND version = v_version;      -- fails silently if someone else won the race
-
-    GET DIAGNOSTICS v_rows = ROW_COUNT;
-
-    IF v_rows = 0 THEN
-        RETURN 'CONFLICT_RETRY';
-    END IF;
-
-    BEGIN
-        INSERT INTO enrollments (student_id, section_id, status, decided_at)
-        VALUES (p_student_id, p_section_id, 'ENROLLED', clock_timestamp());
-    EXCEPTION WHEN unique_violation THEN
-        -- roll back the seat we just claimed
-        UPDATE course_sections SET seats_filled = seats_filled - 1 WHERE section_id = p_section_id;
-        RETURN 'ALREADY_ENROLLED';
-    END;
-
-    RETURN 'ENROLLED';
+    INSERT INTO students (auth_subject, full_name, email)
+    VALUES (p_subject, left(split_part(p_email, '@', 1), 200), lower(p_email))
+    ON CONFLICT (auth_subject) DO UPDATE SET email = EXCLUDED.email
+    RETURNING student_id INTO result;
+    RETURN result;
 END;
-$$ LANGUAGE plpgsql;
+$$;

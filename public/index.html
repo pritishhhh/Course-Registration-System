@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Browse courses, register for a section, and manage your waitlist.">
+  <title>Course Registration</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/">CR<span>/</span> Course Registration</a><span class="header-note">STUDENT PORTAL</span></header>
+  <main>
+    <section class="intro"><p class="eyebrow">PLAN YOUR NEXT CHAPTER</p><h1>Your semester,<br>one course at a time.</h1><p>Explore available sections and build your schedule. When a course fills up, join the waitlist and keep your place.</p></section>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="layout">
+      <section class="catalog" aria-labelledby="catalog-title">
+        <div class="section-heading"><div><p class="eyebrow">EXPLORE</p><h2 id="catalog-title">Course catalog</h2></div><button class="secondary" id="refresh" type="button">Refresh availability</button></div>
+        <label class="search-label" for="search">Find a course</label><input id="search" type="search" placeholder="Search code, title, or instructor">
+        <div id="courses" aria-live="polite"><p class="muted">Loading courses…</p></div>
+        <p class="fine">Availability updates when you refresh or register. Seats are confirmed when your request completes.</p>
+      </section>
+      <aside>
+        <section class="panel" id="account-panel"><p class="eyebrow">YOUR ACCOUNT</p><h2 id="account-title">Ready to register?</h2><p class="muted" id="account-note">Sign in to manage your courses and waitlists.</p>
+          <div id="github-login"><button type="button" class="full" id="github">Continue with GitHub</button><p class="fine">Or use your email account</p></div>
+          <form id="auth-form"><label for="email">Email</label><input id="email" type="email" autocomplete="email" maxlength="320" required><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" minlength="8" maxlength="128" required><button type="submit" id="signin">Sign in</button><button type="button" class="secondary full" id="signup">Create account</button></form>
+          <button type="button" class="secondary full" id="signout" hidden>Sign out</button>
+        </section>
+        <section class="panel" aria-labelledby="schedule-title"><p class="eyebrow">YOUR SEMESTER</p><h2 id="schedule-title">My registrations</h2><div id="registrations"><p class="muted">Your registered courses will appear here after you sign in.</p></div></section>
+        <p class="fine">A dropped seat automatically goes to the next student on the waitlist.</p>
+      </aside>
+    </div>
+  </main>
+  <footer><span>Course Registration</span><a href="/docs">API documentation ↗</a><a href="https://github.com/pritishhhh/Course-Registration-System">Source code ↗</a></footer>
+</body>
+</html>

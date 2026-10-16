@@ -1,44 +1,57 @@
--- =========================================================
--- 03_triggers.sql
--- A lightweight trigger that mirrors every enrollment status change into
--- the audit log automatically -- a safety net even if someone bypasses
--- the stored procedures and updates enrollments directly.
--- =========================================================
-
-CREATE OR REPLACE FUNCTION trg_enrollment_audit() RETURNS TRIGGER AS $$
+-- Exactly one event per status transition; renumbering is not a request.
+CREATE FUNCTION trg_enrollment_audit() RETURNS TRIGGER
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE event TEXT;
 BEGIN
-    IF TG_OP = 'INSERT' THEN
-        INSERT INTO registration_audit (section_id, student_id, action, detail)
-        VALUES (NEW.section_id, NEW.student_id, 'ROW_INSERTED',
-                jsonb_build_object('status', NEW.status));
-    ELSIF TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status THEN
-        INSERT INTO registration_audit (section_id, student_id, action, detail)
-        VALUES (NEW.section_id, NEW.student_id, 'STATUS_CHANGED',
-                jsonb_build_object('from', OLD.status, 'to', NEW.status));
+    IF TG_OP = 'INSERT' THEN event := NEW.status::TEXT;
+    ELSIF NEW.status IS NOT DISTINCT FROM OLD.status THEN RETURN NEW;
+    ELSIF OLD.status = 'WAITLISTED' AND NEW.status = 'ENROLLED' THEN event := 'PROMOTED_FROM_WAITLIST';
+    ELSE event := 'DROPPED_' || OLD.status::TEXT;
     END IF;
+    INSERT INTO registration_audit (section_id, student_id, action, detail)
+    VALUES (NEW.section_id, NEW.student_id, event,
+        jsonb_build_object('enrollment_id', NEW.enrollment_id, 'position', NEW.waitlist_position));
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS enrollment_audit ON enrollments;
-CREATE TRIGGER enrollment_audit
-    AFTER INSERT OR UPDATE ON enrollments
-    FOR EACH ROW EXECUTE FUNCTION trg_enrollment_audit();
-
--- Belt-and-suspenders: capacity is already enforced by fn_register_safe's
--- row lock, but this trigger guarantees the invariant at the DB level even
--- if a bug ever lets seats_filled be set directly.
-CREATE OR REPLACE FUNCTION trg_check_capacity() RETURNS TRIGGER AS $$
+$$;
+CREATE TRIGGER enrollment_audit AFTER INSERT OR UPDATE ON enrollments
+FOR EACH ROW EXECUTE FUNCTION trg_enrollment_audit();
+CREATE FUNCTION trg_audit_immutable() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'registration_audit is append-only'; END;
+$$;
+CREATE TRIGGER audit_immutable BEFORE UPDATE OR DELETE ON registration_audit
+FOR EACH ROW EXECUTE FUNCTION trg_audit_immutable();
+-- Validate final state, including unsupported direct writes by administrators.
+CREATE FUNCTION trg_section_invariants() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    sid INT;
+    sec course_sections%ROWTYPE;
+    enrolled INT;
+    waiting INT;
+    max_position INT;
 BEGIN
-    IF NEW.seats_filled > NEW.capacity THEN
-        RAISE EXCEPTION 'seats_filled (%) cannot exceed capacity (%) for section %',
-            NEW.seats_filled, NEW.capacity, NEW.section_id;
+    IF TG_TABLE_NAME = 'enrollments' AND TG_OP = 'UPDATE' THEN
+        IF OLD.section_id <> NEW.section_id OR OLD.student_id <> NEW.student_id THEN
+            RAISE EXCEPTION 'Enrollment identity is immutable';
+        END IF;
     END IF;
-    RETURN NEW;
+    IF TG_OP = 'DELETE' THEN sid := OLD.section_id; ELSE sid := NEW.section_id; END IF;
+    SELECT * INTO sec FROM course_sections WHERE section_id = sid FOR UPDATE;
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    SELECT count(*) FILTER (WHERE status = 'ENROLLED'),
+           count(*) FILTER (WHERE status = 'WAITLISTED'),
+           max(waitlist_position) FILTER (WHERE status = 'WAITLISTED')
+    INTO enrolled, waiting, max_position FROM enrollments WHERE section_id = sid;
+    IF enrolled <> sec.seats_filled OR waiting > sec.waitlist_capacity
+        OR (waiting > 0 AND max_position <> waiting)
+        OR (waiting > 0 AND enrolled < sec.capacity) THEN
+        RAISE EXCEPTION 'Section % invariant violation', sid USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS section_capacity_guard ON course_sections;
-CREATE TRIGGER section_capacity_guard
-    BEFORE UPDATE ON course_sections
-    FOR EACH ROW EXECUTE FUNCTION trg_check_capacity();
+$$;
+CREATE CONSTRAINT TRIGGER enrollment_invariants AFTER INSERT OR UPDATE OR DELETE ON enrollments
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION trg_section_invariants();
+CREATE CONSTRAINT TRIGGER section_invariants AFTER INSERT OR UPDATE ON course_sections
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION trg_section_invariants();
